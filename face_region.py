@@ -1,19 +1,34 @@
 """Face ROI (forehead / cheeks) as a binary mask + polygons for drawing.
 
-Primary: MediaPipe FaceMesh landmarks. Fallback: OpenCV Haar face box with a
-geometric forehead rectangle, so a broken mediapipe install doesn't kill the
-project (known failure point #3).
+Primary: MediaPipe Tasks FaceLandmarker (mp.tasks.vision) — mediapipe >= 0.10
+dropped the legacy mp.solutions.face_mesh API. Fallback: OpenCV Haar face box
+with a geometric forehead rectangle, so a broken/incompatible mediapipe
+install (or a model-download failure) doesn't kill the project (known failure
+point #3).
 """
+import os
+import urllib.request
 from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 
-# FaceMesh landmark index sets; convex hull makes ordering irrelevant.
+# Same 468-point face mesh topology the legacy API used; indices unchanged.
 FOREHEAD = [10, 109, 67, 103, 54, 21, 70, 63, 105, 66, 107, 9,
             336, 296, 334, 293, 300, 251, 284, 332, 297, 338]
 LEFT_CHEEK = [50, 101, 100, 118, 117, 111, 116, 123, 147, 187, 205, 36]
 RIGHT_CHEEK = [280, 330, 329, 347, 346, 340, 345, 352, 376, 411, 425, 266]
+
+MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+             "face_landmarker/float16/1/face_landmarker.task")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "face_landmarker.task")
+
+
+def _ensure_model():
+    if not os.path.exists(MODEL_PATH):
+        print(f"downloading face landmark model to {MODEL_PATH} ...")
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    return MODEL_PATH
 
 
 @dataclass
@@ -26,19 +41,32 @@ class RoiResult:
 class FaceMeshRegion:
     def __init__(self, roi_mode="both"):
         import mediapipe as mp
-        self.mesh = mp.solutions.face_mesh.FaceMesh(
-            max_num_faces=1, refine_landmarks=False,
-            min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        model_path = _ensure_model()
+        opts = mp.tasks.vision.FaceLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+            running_mode=mp.tasks.vision.RunningMode.VIDEO,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5)
+        self.landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(opts)
+        self.mp = mp
         self.roi_mode = roi_mode
         self._prev_pts = None
+        self._frame_idx = 0
 
     def find(self, frame):
         h, w = frame.shape[:2]
-        res = self.mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if not res.multi_face_landmarks:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=rgb)
+        # VIDEO mode requires a strictly increasing per-frame timestamp (ms);
+        # the value only needs to be monotonic, not wall-clock accurate.
+        self._frame_idx += 1
+        res = self.landmarker.detect_for_video(mp_image, self._frame_idx)
+        if not res.face_landmarks:
             self._prev_pts = None
             return None
-        lm = res.multi_face_landmarks[0].landmark
+        lm = res.face_landmarks[0]
         pts = np.array([(p.x * w, p.y * h) for p in lm], dtype=np.float32)
 
         face_size = float(pts[:, 1].max() - pts[:, 1].min())
@@ -96,6 +124,6 @@ class HaarRegion:
 def make_region_finder(roi_mode="both"):
     try:
         return FaceMeshRegion(roi_mode)
-    except ImportError as e:
+    except Exception as e:
         print(f"mediapipe unavailable ({e}) — falling back to OpenCV face box")
         return HaarRegion()
