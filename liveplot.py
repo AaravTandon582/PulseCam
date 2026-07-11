@@ -39,13 +39,13 @@ def trace_panel(v, w, title, color):
     return img
 
 
-def spectrum_panel(freqs, power, bpm, w):
-    img = _canvas(w, f"spectrum ({HR_BAND[0] * 60:.0f}-{HR_BAND[1] * 60:.0f} BPM)")
+def spectrum_panel(freqs, power, bpm, w, hr_band=HR_BAND):
+    img = _canvas(w, f"spectrum ({hr_band[0] * 60:.0f}-{hr_band[1] * 60:.0f} BPM)")
     if freqs is None:
         cv2.putText(img, "waiting for data...", (w // 2 - 70, PANEL_H // 2),
                     FONT, 0.5, TEXT, 1, cv2.LINE_AA)
         return img
-    band = (freqs >= HR_BAND[0]) & (freqs <= HR_BAND[1])
+    band = (freqs >= hr_band[0]) & (freqs <= hr_band[1])
     f, p = freqs[band], power[band]
     if len(f) >= 2 and p.max() > 0:
         xs = 6 + (f - f[0]) / (f[-1] - f[0]) * (w - 12)
@@ -65,11 +65,12 @@ def panels(buf, result, w):
     _, raw_live = buf.arrays() if buf.span() > 0 else (None, [])
     out = [trace_panel(raw_live, w, "raw green trace", RAW_C)]
     if result is not None:
+        hr_band = result.get("hr_band", HR_BAND)
         out.append(trace_panel(result["filtered"], w,
-                               f"filtered {HR_BAND[0]}-{HR_BAND[1]} Hz  "
+                               f"filtered {hr_band[0]}-{hr_band[1]} Hz  "
                                f"(fs={result['fs']:.1f})", FILT_C))
         out.append(spectrum_panel(result["freqs"], result["power"],
-                                  result["bpm"], w))
+                                  result["bpm"], w, hr_band))
     else:
         out.append(trace_panel([], w, "filtered", FILT_C))
         out.append(spectrum_panel(None, None, None, w))
