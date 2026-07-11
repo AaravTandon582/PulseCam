@@ -5,6 +5,7 @@ with live instrumentation panels (raw / filtered / spectrum) stacked below
 the camera view. q or ESC quits.
 """
 import argparse
+import sys
 from collections import deque
 
 import cv2
@@ -22,6 +23,7 @@ import signal_extract
 DSP_INTERVAL = 0.5   # seconds between BPM recomputes (~2x/sec)
 DRIFT_CONFIRMATIONS = 3
 DRIFT_AGREEMENT_BPM = 6.0
+STALE_AFTER_S = 12.0   # dim a completed check left idle this long
 
 
 def parse_args():
@@ -65,7 +67,12 @@ def main():
         raise ValueError("--max-jump cannot be negative")
     if args.check_duration < args.window:
         raise ValueError("--check-duration must be at least --window")
-    src = capture.FrameSource(camera=args.camera, video=args.video)
+    try:
+        src = capture.FrameSource(camera=args.camera, video=args.video)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        overlay.show_fatal_error(str(e))
+        raise SystemExit(1)
     finder = face_region.make_region_finder(args.roi)
     recorder = capture.ClipRecorder(args.record) if args.record else None
     def new_check():
@@ -80,9 +87,11 @@ def main():
     result = None
     check_complete = False
     completed_bpm = None
+    completed_at = None
     session_saved = False
     shown_bpm = None
     session_bpms = []
+    valid_s = 0.0   # face-present seconds; check progress counts only these
 
     while True:
         t, frame = src.read()
@@ -93,14 +102,19 @@ def main():
         if recorder:
             recorder.add(t, frame)
 
-        if prev_t is not None and t > prev_t:
-            inst = 1.0 / (t - prev_t)
+        dt = t - prev_t if prev_t is not None and t > prev_t else 0.0
+        if dt > 0:
+            inst = 1.0 / dt
             fps = inst if fps == 0 else 0.9 * fps + 0.1 * inst
         prev_t = t
 
         roi = finder.find(frame)
         if roi is not None:
             buf.add(t, frame, roi.mask)
+            if not check_complete:
+                # A face dropout pauses this clock, extending the check
+                # rather than letting it complete over an interpolated gap.
+                valid_s += min(dt, 0.5)
 
         if t - last_dsp >= DSP_INTERVAL and buf.span() >= 5.0:
             last_dsp = t
@@ -146,27 +160,32 @@ def main():
                     ok, status = False, "stabilizing reading - hold still"
         measurement_bpm = (session_log.robust_bpm(session_bpms)
                            if session_bpms else shown_bpm)
-        if (not check_complete and measurement_bpm is not None and span >= args.check_duration
+        if (not check_complete and measurement_bpm is not None
+                and valid_s >= args.check_duration
                 and ok and result is not None):
             check_complete = True
             completed_bpm = measurement_bpm
+            completed_at = t
             status, status_ok = "check complete", True
             if not args.no_save_session and not session_saved:
                 path = session_log.save(args.session_dir, completed_bpm,
                                         args.check_duration, result, args.method)
                 print(f"pulse check saved: {path}")
                 session_saved = True
+        stale = False
         if check_complete:
             measurement_bpm = completed_bpm
-            status, ok = "check complete", True
+            stale = t - completed_at >= STALE_AFTER_S
+            status, ok = (("press r for new check", False) if stale
+                          else ("check complete", True))
         bpm_text = (f"{measurement_bpm:.0f} BPM"
                     if measurement_bpm is not None else "-- BPM")
 
         display = overlay.draw(frame, roi.polys if roi else [], fps,
                                bpm_text, status, ok,
-                               check_progress=min(1.0, span / args.check_duration),
+                               check_progress=min(1.0, valid_s / args.check_duration),
                                check_duration=args.check_duration,
-                               check_complete=check_complete)
+                               check_complete=check_complete, stale=stale)
         stack = np.vstack([display] + liveplot.panels(buf, result, display.shape[1]))
         cv2.imshow("pulse-cam", stack)
         key = cv2.waitKey(1) & 0xFF
@@ -178,9 +197,11 @@ def main():
             last_dsp = t
             check_complete = False
             completed_bpm = None
+            completed_at = None
             session_saved = False
             shown_bpm = None
             session_bpms = []
+            valid_s = 0.0
 
     src.release()
     if recorder:
