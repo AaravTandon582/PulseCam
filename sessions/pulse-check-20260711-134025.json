@@ -1,9 +1,0 @@
-{
-  "completed_at": "2026-07-11T13:40:25-0700",
-  "bpm": 82.2,
-  "measurement_seconds": 30.0,
-  "method": "pos",
-  "sample_rate_hz": 15.0,
-  "snr": 7.84,
-  "peak_dominance": 1.46
-}

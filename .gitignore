@@ -4,3 +4,5 @@ dumps/
 clips/
 *.mp4
 .DS_Store
+sessions/
+CLAUDE.md
